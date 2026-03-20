@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import pdf2image; print\\(''pdf2image ok''\\)\")",
+      "Bash(python3 -c \"import fitz; print\\(''PyMuPDF ok''\\)\")"
+    ]
+  }
+}
