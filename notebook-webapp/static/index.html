@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Notebook Transcription</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header>
+    <div class="header-inner">
+      <span class="logo">📓</span>
+      <h1>Notebook Transcription</h1>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab-btn active" onclick="switchTab('process')">Process</button>
+    <button class="tab-btn" onclick="switchTab('chat')">Chat</button>
+    <button class="tab-btn" onclick="switchTab('write')">Write</button>
+  </nav>
+
+  <main>
+
+    <!-- ── Tab 1: Process ──────────────────────────────────────────────────── -->
+    <section id="tab-process" class="tab active">
+
+      <div class="card">
+        <h2>Upload & Process Notebook</h2>
+
+        <div class="upload-area" id="upload-area"
+             ondragover="event.preventDefault(); this.classList.add('drag-over')"
+             ondragleave="this.classList.remove('drag-over')"
+             ondrop="handleDrop(event)">
+          <input type="file" id="pdf-input" accept=".pdf" hidden onchange="handleFileSelect(this.files[0])">
+          <div id="upload-idle">
+            <div class="upload-icon">📄</div>
+            <p>Drag &amp; drop a PDF, or
+              <button class="link-btn" onclick="document.getElementById('pdf-input').click()">browse</button>
+            </p>
+            <p class="hint">2–24 pages · PDF scan of a notebook</p>
+          </div>
+          <div id="upload-ready" hidden>
+            <div class="upload-icon">✅</div>
+            <p id="selected-filename" class="filename"></p>
+            <button class="link-btn small" onclick="clearPDF()">Remove</button>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="nb-id">Notebook ID</label>
+            <input type="text" id="nb-id" value="NB" placeholder="e.g. NB05">
+          </div>
+          <div class="form-group">
+            <label for="nb-date">Date</label>
+            <input type="text" id="nb-date" value="2026" placeholder="e.g. 2026">
+          </div>
+          <div class="form-group">
+            <label for="nb-topic">Topic</label>
+            <input type="text" id="nb-topic" value="notebook" placeholder="e.g. ideas">
+          </div>
+        </div>
+
+        <button class="btn-primary" id="process-btn" onclick="startProcessing()" disabled>
+          Start Processing
+        </button>
+      </div>
+
+      <!-- Progress card -->
+      <div class="card" id="progress-card" hidden>
+        <h2>Progress</h2>
+        <p id="status-msg" class="status-msg"></p>
+        <ul id="pages-list" class="pages-list"></ul>
+        <div id="done-section" hidden class="done-section">
+          <p class="success-banner">All pages transcribed!</p>
+          <div class="done-actions">
+            <button class="btn-primary" onclick="downloadCombined()">⬇ Download .md</button>
+            <button class="btn-secondary" onclick="openInChat()">Open in Chat</button>
+            <button class="btn-secondary" onclick="openInWrite()">Open in Write</button>
+          </div>
+        </div>
+        <div id="error-banner" hidden class="error-banner"></div>
+      </div>
+
+    </section>
+
+    <!-- ── Tab 2: Chat ─────────────────────────────────────────────────────── -->
+    <section id="tab-chat" class="tab" hidden>
+
+      <div class="card">
+        <h2>Chat with Your Notebook</h2>
+        <div class="file-loader">
+          <select id="chat-file-select" onchange="loadChatFile()">
+            <option value="">— select a notebook file —</option>
+          </select>
+          <span class="or-sep">or</span>
+          <label class="btn-secondary upload-label">
+            Upload .md
+            <input type="file" accept=".md" hidden onchange="uploadMdForChat(this)">
+          </label>
+        </div>
+        <div id="chat-file-indicator" class="file-indicator" hidden></div>
+      </div>
+
+      <div class="card chat-card" id="chat-panel" hidden>
+        <div id="chat-messages" class="chat-messages"></div>
+
+        <div class="quick-btns">
+          <button class="quick-btn" onclick="askQuick('What are the main topics covered in this notebook?')">Main topics</button>
+          <button class="quick-btn" onclick="askQuick('Describe the visual style and drawing techniques used throughout.')">Visual style</button>
+          <button class="quick-btn" onclick="askQuick('Are there any illustrations or diagrams? Describe them in detail.')">Illustrations</button>
+          <button class="quick-btn" onclick="askQuick('What frameworks, models, or structured thinking tools appear?')">Frameworks</button>
+        </div>
+
+        <div class="chat-input-row">
+          <textarea id="chat-input" placeholder="Ask anything about the notebook…" rows="2"
+                    onkeydown="handleChatKey(event)"></textarea>
+          <button class="btn-primary send-btn" id="send-btn" onclick="sendChat()">Send</button>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- ── Tab 3: Write ────────────────────────────────────────────────────── -->
+    <section id="tab-write" class="tab" hidden>
+
+      <div class="card">
+        <h2>Write from Your Notebook</h2>
+        <div class="file-loader">
+          <select id="write-file-select" onchange="loadWriteFile()">
+            <option value="">— select a notebook file —</option>
+          </select>
+          <span class="or-sep">or</span>
+          <label class="btn-secondary upload-label">
+            Upload .md
+            <input type="file" accept=".md" hidden onchange="uploadMdForWrite(this)">
+          </label>
+        </div>
+        <div id="write-file-indicator" class="file-indicator" hidden></div>
+
+        <div id="write-form" hidden>
+          <div class="form-group" style="margin-top:20px">
+            <label for="write-topic">Topic / Focus <span class="optional">(optional)</span></label>
+            <input type="text" id="write-topic"
+                   placeholder="e.g. the creative process, insights on leadership…">
+          </div>
+
+          <div class="form-row" style="margin-top:16px">
+            <div class="form-group">
+              <label for="write-type">Output type</label>
+              <select id="write-type">
+                <option value="full article">Full Article</option>
+                <option value="bullet points">Bullet Points</option>
+                <option value="article angles">Article Angles</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="write-tone">Tone</label>
+              <select id="write-tone">
+                <option value="professional">Professional</option>
+                <option value="conversational">Conversational</option>
+                <option value="inspirational">Inspirational</option>
+              </select>
+            </div>
+          </div>
+
+          <button class="btn-primary" id="generate-btn" onclick="generateContent()" style="margin-top:20px">
+            Generate
+          </button>
+        </div>
+      </div>
+
+      <div class="card" id="write-output-card" hidden>
+        <div class="output-header">
+          <h2>Output</h2>
+          <div class="output-actions">
+            <button class="btn-secondary" onclick="copyOutput()">Copy</button>
+            <button class="btn-secondary" onclick="downloadOutput()">Download</button>
+          </div>
+        </div>
+        <div id="write-output" class="write-output"></div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
