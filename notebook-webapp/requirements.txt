@@ -4,3 +4,5 @@ anthropic>=0.28.0
 PyMuPDF>=1.24.0
 Pillow>=10.0.0
 python-multipart>=0.0.9
+rumps>=0.4.0
+py2app>=0.28.0
