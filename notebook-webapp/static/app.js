@@ -19,21 +19,24 @@ const state = {
   writeItems:        [],
   writeSelectedIds:  new Set(),
   // Shared picker
-  libraryCache:      null,        // [{job_id, notebook, date, …}]
+  libraryCache:          null,    // [{job_id, notebook, date, …}]
+  // Tab 4 – Illustrate
+  illustrationHistory:   [],      // [{url, filename, prompt}] — newest first, max 5
 };
 
 /* ── Tab switching ─────────────────────────────────────────────────────────── */
 
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach((btn, i) => {
-    const names = ['library', 'process', 'chat', 'write'];
+    const names = ['library', 'process', 'chat', 'write', 'illustrate'];
     btn.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab').forEach(el => {
     const id = el.id.replace('tab-', '');
     el.hidden = id !== name;
   });
-  if (name === 'library') loadLibrary();
+  if (name === 'library')    loadLibrary();
+  if (name === 'illustrate') initIllustrateTab();
 }
 
 /* ── Tab 1: Process ────────────────────────────────────────────────────────── */
@@ -745,4 +748,138 @@ async function libraryOpenIn(jobId, tab) {
   } catch (e) {
     alert(`Could not load notebook: ${e.message}`);
   }
+}
+
+/* ── Tab 4: Illustrate ─────────────────────────────────────────────────────── */
+
+let _illusTabInitialised = false;
+
+async function initIllustrateTab() {
+  // Populate style picker from library (refresh each visit)
+  try {
+    const res = await fetch('/api/library');
+    if (res.ok) {
+      const { notebooks } = await res.json();
+      const sel = document.getElementById('illus-style-select');
+      const prev = sel.value;
+      sel.innerHTML = '<option value="">— no style reference —</option>';
+      notebooks.forEach(nb => {
+        const opt = document.createElement('option');
+        opt.value       = nb.job_id;
+        opt.textContent = nb.notebook + (nb.date ? ` · ${nb.date}` : '');
+        sel.appendChild(opt);
+      });
+      if (prev) sel.value = prev;   // restore selection if still valid
+    }
+  } catch (_) {}
+
+  // Load persisted history on first visit
+  if (!_illusTabInitialised) {
+    _illusTabInitialised = true;
+    try {
+      const res = await fetch('/api/illustrate/history');
+      if (res.ok) {
+        const { images } = await res.json();
+        if (images.length > 0) {
+          // Merge server history with any in-session items (server is older)
+          const inSessionUrls = new Set(state.illustrationHistory.map(i => i.url));
+          images.forEach(img => {
+            if (!inSessionUrls.has(img.url)) {
+              state.illustrationHistory.push({ url: img.url, filename: img.filename, prompt: '' });
+            }
+          });
+          state.illustrationHistory = state.illustrationHistory.slice(0, 5);
+          renderIllusHistory();
+        }
+      }
+    } catch (_) {}
+  }
+}
+
+async function generateIllustration() {
+  const promptEl = document.getElementById('illus-prompt');
+  const styleId  = document.getElementById('illus-style-select').value;
+  const prompt   = promptEl.value.trim();
+
+  if (!prompt) { promptEl.focus(); return; }
+
+  const btn = document.getElementById('illus-generate-btn');
+  btn.disabled    = true;
+  btn.textContent = 'Generating…';
+
+  const loadingCard = document.getElementById('illus-loading-card');
+  const loadingSub  = document.getElementById('illus-loading-sub');
+  loadingCard.hidden = false;
+  loadingSub.textContent = 'Stable Diffusion is running on your Mac. This typically takes 30–60 seconds.';
+  loadingCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+  // Escalate message if it's taking long (likely first-run model download)
+  const slowTimer = setTimeout(() => {
+    loadingSub.textContent =
+      'Taking longer than usual — the model may be downloading for the first time (~4 GB). This only happens once.';
+  }, 20000);
+
+  try {
+    const res = await fetch('/api/illustrate', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        style_notebook_id: styleId || null,
+        user_prompt:       prompt,
+      }),
+    });
+    clearTimeout(slowTimer);
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+
+    const { url, filename, prompt: sdPrompt } = await res.json();
+    showIllusResult(url, filename, sdPrompt);
+
+    // Prepend to history (newest first), cap at 5
+    state.illustrationHistory.unshift({ url, filename, prompt: sdPrompt });
+    if (state.illustrationHistory.length > 5) state.illustrationHistory.length = 5;
+    renderIllusHistory();
+
+  } catch (e) {
+    clearTimeout(slowTimer);
+    alert(`Generation failed: ${e.message}`);
+  } finally {
+    loadingCard.hidden  = true;
+    btn.disabled        = false;
+    btn.textContent     = 'Generate illustration';
+  }
+}
+
+function showIllusResult(url, filename, prompt) {
+  const img     = document.getElementById('illus-result-img');
+  const dlBtn   = document.getElementById('illus-download-btn');
+  const label   = document.getElementById('illus-prompt-label');
+  const card    = document.getElementById('illus-result-card');
+
+  img.src        = url;
+  dlBtn.href     = url;
+  dlBtn.download = filename;
+  label.textContent = prompt ? `Prompt: ${prompt}` : '';
+  card.hidden    = false;
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function renderIllusHistory() {
+  const items    = state.illustrationHistory;
+  const card     = document.getElementById('illus-history-card');
+  const grid     = document.getElementById('illus-history-grid');
+
+  if (items.length === 0) { card.hidden = true; return; }
+
+  card.hidden  = false;
+  grid.innerHTML = items.map((item, i) => `
+    <button class="illus-thumb-btn ${i === 0 ? 'illus-thumb-active' : ''}"
+            onclick="showIllusResult('${esc(item.url)}','${esc(item.filename)}','${esc(item.prompt)}')"
+            title="${esc(item.prompt || item.filename)}">
+      <img src="${esc(item.url)}" alt="Illustration ${i + 1}" class="illus-thumb">
+    </button>
+  `).join('');
 }

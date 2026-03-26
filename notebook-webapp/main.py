@@ -24,15 +24,26 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
+try:
+    import torch
+    from diffusers import StableDiffusionPipeline
+    _HAS_SD = True
+except ImportError:
+    _HAS_SD = False
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 HIGH_RES_DPI = 200
 MAX_DIMENSION = 1024
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
-BASE_DIR   = Path(__file__).parent
-DATA_DIR   = BASE_DIR / "data"
-STATIC_DIR = BASE_DIR / "static"
+BASE_DIR          = Path(__file__).parent
+DATA_DIR          = BASE_DIR / "data"
+STATIC_DIR        = BASE_DIR / "static"
+ILLUSTRATIONS_DIR = DATA_DIR / "illustrations"
+MODELS_DIR        = DATA_DIR / "models"
+
+SD_MODEL_ID = "runwayml/stable-diffusion-v1-5"
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 Image.MAX_IMAGE_PIXELS = None
@@ -81,8 +92,50 @@ client = anthropic.AsyncAnthropic(
 jobs: dict[str, dict] = {}
 
 # Ensure data directories exist at startup
-for d in [DATA_DIR, DATA_DIR / "uploads", DATA_DIR / "jobs"]:
+for d in [DATA_DIR, DATA_DIR / "uploads", DATA_DIR / "jobs",
+          ILLUSTRATIONS_DIR, MODELS_DIR]:
     d.mkdir(parents=True, exist_ok=True)
+
+# ── Stable Diffusion pipeline (lazy-loaded on first request) ───────────────────
+
+_sd_pipeline = None
+_sd_load_lock  = asyncio.Lock()   # prevents concurrent model loads
+_sd_infer_lock = asyncio.Lock()   # prevents concurrent inference (OOM guard)
+
+
+async def _get_sd_pipeline():
+    """Return the loaded SD pipeline, loading it on first call."""
+    global _sd_pipeline
+    if _sd_pipeline is not None:
+        return _sd_pipeline
+
+    async with _sd_load_lock:
+        if _sd_pipeline is not None:          # double-check after acquiring lock
+            return _sd_pipeline
+
+        def _load():
+            if torch.backends.mps.is_available():
+                device, dtype = "mps", torch.float16
+            elif torch.cuda.is_available():
+                device, dtype = "cuda", torch.float16
+            else:
+                device, dtype = "cpu", torch.float32
+
+            print(f"[SD] Loading {SD_MODEL_ID} → {device} ({dtype}) …")
+            pipe = StableDiffusionPipeline.from_pretrained(
+                SD_MODEL_ID,
+                torch_dtype=dtype,
+                cache_dir=str(MODELS_DIR),
+                safety_checker=None,
+                requires_safety_checker=False,
+            )
+            pipe = pipe.to(device)
+            pipe.enable_attention_slicing()
+            print(f"[SD] Pipeline ready on {device}")
+            return pipe
+
+        _sd_pipeline = await asyncio.to_thread(_load)
+        return _sd_pipeline
 
 
 # ── Helper functions ───────────────────────────────────────────────────────────
@@ -657,6 +710,102 @@ async def library_download(job_id: str):
     return FileResponse(path, filename=path.name, media_type="text/markdown")
 
 
+# ── Illustrate routes ──────────────────────────────────────────────────────────
+
+@app.post("/api/illustrate")
+async def illustrate(request: dict):
+    if not _HAS_SD:
+        raise HTTPException(
+            503,
+            "Stable Diffusion dependencies not installed. "
+            "Run: pip install torch torchvision diffusers transformers accelerate",
+        )
+
+    style_notebook_id: str | None = request.get("style_notebook_id")
+    user_prompt: str = request.get("user_prompt", "").strip()
+    if not user_prompt:
+        raise HTTPException(400, "user_prompt is required")
+
+    # 1. Load style context from notebook (first 3 000 chars is plenty for style)
+    style_context = ""
+    if style_notebook_id:
+        try:
+            job_dir = _resolve_job_dir(style_notebook_id)
+            combined_files = list(job_dir.glob("*_complete.md"))
+            if combined_files:
+                style_context = combined_files[0].read_text(encoding="utf-8")[:3000]
+        except HTTPException:
+            pass  # invalid job_id — proceed without style
+
+    # 2. Build an enriched SD prompt via Claude
+    if style_context:
+        enrichment_msg = (
+            "Based on this visual style description, create a Stable Diffusion prompt "
+            "that captures: hand-drawn, sketchnote style, the specific colours, line quality, "
+            f"and illustration approach. Apply this style to: {user_prompt}. "
+            "Return only the prompt, no explanation.\n\n"
+            f"<style>\n{style_context}\n</style>"
+        )
+        response = await client.messages.create(
+            model=DEFAULT_MODEL,
+            max_tokens=256,
+            messages=[{"role": "user", "content": enrichment_msg}],
+        )
+        sd_prompt = response.content[0].text.strip()
+    else:
+        sd_prompt = (
+            f"hand-drawn sketchnote illustration, {user_prompt}, "
+            "pen and ink, bold marker strokes, warm off-white paper, clean lines, "
+            "visual thinking style, minimal colour palette"
+        )
+
+    # 3. Run Stable Diffusion (blocks in a thread so the event loop stays free)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    filename  = f"illustration_{timestamp}.png"
+    out_path  = ILLUSTRATIONS_DIR / filename
+
+    async with _sd_infer_lock:
+        pipe = await _get_sd_pipeline()
+
+        def _infer():
+            if torch.backends.mps.is_available():
+                torch.mps.empty_cache()
+            result = pipe(
+                sd_prompt,
+                num_inference_steps=25,
+                guidance_scale=7.5,
+                width=512,
+                height=512,
+            )
+            result.images[0].save(str(out_path), format="PNG")
+
+        await asyncio.to_thread(_infer)
+
+    return {
+        "url":      f"/illustrations/{filename}",
+        "filename": filename,
+        "prompt":   sd_prompt,
+    }
+
+
+@app.get("/api/illustrate/history")
+async def illustrate_history():
+    if not ILLUSTRATIONS_DIR.exists():
+        return {"images": []}
+    files = sorted(
+        ILLUSTRATIONS_DIR.glob("*.png"),
+        key=lambda f: f.stat().st_mtime,
+        reverse=True,
+    )[:5]
+    return {
+        "images": [
+            {"url": f"/illustrations/{f.name}", "filename": f.name}
+            for f in files
+        ]
+    }
+
+
 # ── Static files (must be last) ────────────────────────────────────────────────
 
+app.mount("/illustrations", StaticFiles(directory=str(ILLUSTRATIONS_DIR)), name="illustrations")
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

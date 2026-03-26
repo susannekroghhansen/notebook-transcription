@@ -34,6 +34,7 @@
     <button class="tab-btn active" onclick="switchTab('process')">Process</button>
     <button class="tab-btn" onclick="switchTab('chat')">Chat</button>
     <button class="tab-btn" onclick="switchTab('write')">Write</button>
+    <button class="tab-btn" onclick="switchTab('illustrate')">Illustrate</button>
   </nav>
 
   <main>
@@ -212,6 +213,64 @@
           </div>
         </div>
         <div id="write-output" class="write-output"></div>
+      </div>
+
+    </section>
+
+    <!-- ── Tab 4: Illustrate ───────────────────────────────────────────────── -->
+    <section id="tab-illustrate" class="tab" hidden>
+
+      <!-- Form card -->
+      <div class="card">
+        <h2>Generate an Illustration</h2>
+
+        <div class="form-group" style="margin-bottom:16px">
+          <label for="illus-style-select">Style from notebook <span class="optional">(optional)</span></label>
+          <select id="illus-style-select">
+            <option value="">— no style reference —</option>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label for="illus-prompt">What would you like illustrated?</label>
+          <textarea id="illus-prompt" rows="3"
+            placeholder="e.g. a person thinking at a whiteboard, a network of interconnected ideas, a rocket launching…"
+            onkeydown="if(event.key==='Enter'&&event.metaKey) generateIllustration()"></textarea>
+        </div>
+
+        <button class="btn-primary" id="illus-generate-btn"
+                onclick="generateIllustration()" style="margin-top:20px;width:100%">
+          Generate illustration
+        </button>
+      </div>
+
+      <!-- Loading card -->
+      <div class="card illus-loading-card" id="illus-loading-card" hidden>
+        <div class="illus-loading-row">
+          <div class="illus-spinner"></div>
+          <div>
+            <p class="illus-loading-title">Generating locally…</p>
+            <p class="illus-loading-sub" id="illus-loading-sub">
+              Stable Diffusion is running on your Mac. This typically takes 30–60 seconds.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Result card -->
+      <div class="card" id="illus-result-card" hidden>
+        <div class="illus-result-header">
+          <h2>Generated</h2>
+          <a class="btn-secondary" id="illus-download-btn" download>Download</a>
+        </div>
+        <img id="illus-result-img" class="illus-result-img" src="" alt="Generated illustration">
+        <p class="illus-prompt-label" id="illus-prompt-label"></p>
+      </div>
+
+      <!-- History card -->
+      <div class="card" id="illus-history-card" hidden>
+        <h2>Recent illustrations</h2>
+        <div class="illus-history-grid" id="illus-history-grid"></div>
       </div>
 
     </section>

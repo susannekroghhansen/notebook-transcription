@@ -670,6 +670,97 @@ select { cursor: pointer; }
   align-self: center;
 }
 
+/* ── Illustrate tab ────────────────────────────────────────────────────────── */
+
+/* Loading state */
+.illus-loading-card { padding: 28px 24px; }
+
+.illus-loading-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.illus-spinner {
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent-h);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+  margin-top: 2px;
+}
+
+.illus-loading-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.illus-loading-sub {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.55;
+  transition: all .3s;
+}
+
+/* Result card */
+.illus-result-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.illus-result-img {
+  display: block;
+  width: 100%;
+  max-width: 512px;
+  height: auto;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.illus-prompt-label {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.55;
+  font-style: italic;
+  word-break: break-word;
+}
+
+/* History grid */
+.illus-history-grid {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.illus-thumb-btn {
+  background: none;
+  border: 2px solid transparent;
+  border-radius: 8px;
+  padding: 0;
+  cursor: pointer;
+  transition: border-color .15s, transform .1s;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.illus-thumb-btn:hover          { border-color: var(--accent-h); transform: scale(1.03); }
+.illus-thumb-btn.illus-thumb-active { border-color: var(--accent-h); }
+
+.illus-thumb {
+  display: block;
+  width: 100px;
+  height: 100px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
 /* ── Utilities ─────────────────────────────────────────────────────────────── */
 
 [hidden] { display: none !important; }
@@ -682,4 +773,6 @@ select { cursor: pointer; }
   .tab-btn              { padding: 12px 12px 10px; font-size: 14px; }
   .library-card-header  { flex-direction: column; }
   .library-actions      { width: 100%; }
+  .illus-history-grid   { gap: 8px; }
+  .illus-thumb          { width: 80px; height: 80px; }
 }
