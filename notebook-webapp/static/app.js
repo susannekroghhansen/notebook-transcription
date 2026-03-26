@@ -6,29 +6,34 @@ const state = {
   currentJobId:      null,
   eventSource:       null,
   // Shared context
-  lastContent:       null,   // combined .md text from last processed job
+  lastContent:       null,
   lastContentName:   null,
-  // Tab 2
+  // Tab 2 – Chat
   chatContext:       null,
   chatHistory:       [],
-  // Tab 3
+  chatItems:         [],          // [{job_id, name, content}] currently loaded
+  chatSelectedIds:   new Set(),   // checked in picker (before applying)
+  // Tab 3 – Write
   writeContext:      null,
   lastGeneratedText: '',
+  writeItems:        [],
+  writeSelectedIds:  new Set(),
+  // Shared picker
+  libraryCache:      null,        // [{job_id, notebook, date, …}]
 };
 
 /* ── Tab switching ─────────────────────────────────────────────────────────── */
 
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach((btn, i) => {
-    const names = ['process', 'chat', 'write'];
+    const names = ['library', 'process', 'chat', 'write'];
     btn.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab').forEach(el => {
     const id = el.id.replace('tab-', '');
     el.hidden = id !== name;
   });
-  if (name === 'chat')  refreshFileList('chat');
-  if (name === 'write') refreshFileList('write');
+  if (name === 'library') loadLibrary();
 }
 
 /* ── Tab 1: Process ────────────────────────────────────────────────────────── */
@@ -113,7 +118,6 @@ function connectSSE(jobId) {
   };
 
   es.onerror = () => {
-    // EventSource auto-reconnects; only close if job is terminal
     if (state.currentJobId) {
       // Will reconnect; snapshot event will bring us back up to date
     }
@@ -152,6 +156,8 @@ function handleSSEEvent(event) {
       fetchAndStoreCombined(state.currentJobId).then(() => {
         showDoneSection();
         document.getElementById('process-btn').textContent = 'Start Processing';
+        // Bust library cache so next picker open sees the new notebook
+        state.libraryCache = null;
         if (state.eventSource) state.eventSource.close();
       });
       break;
@@ -164,7 +170,7 @@ function handleSSEEvent(event) {
       break;
 
     case 'heartbeat':
-      break; // keep-alive, do nothing
+      break;
   }
 }
 
@@ -252,103 +258,227 @@ function openInWrite() {
   switchTab('write');
 }
 
-/* ── Shared file loading helpers ───────────────────────────────────────────── */
+/* ── Notebook picker ───────────────────────────────────────────────────────── */
 
-async function refreshFileList(tab) {
-  const selectId = tab === 'chat' ? 'chat-file-select' : 'write-file-select';
-  const sel = document.getElementById(selectId);
+let _pickerOutsideHandler = null;
+
+async function togglePicker(tab) {
+  const panel = document.getElementById(`${tab}-picker-panel`);
+  if (!panel.hidden) { closePicker(tab); return; }
+
+  panel.hidden = false;
+  document.getElementById(`${tab}-picker-trigger`).classList.add('open');
+
+  const list = document.getElementById(`${tab}-picker-list`);
+  list.innerHTML = '<p class="picker-loading">Loading…</p>';
+
   try {
-    const res = await fetch('/api/files/list');
-    const { files } = await res.json();
-    const current = sel.value;
-    sel.innerHTML = '<option value="">— select a notebook file —</option>';
-    files.forEach(f => {
-      const opt = document.createElement('option');
-      opt.value = f.path;
-      opt.textContent = `${f.name}  (${f.source})`;
-      sel.appendChild(opt);
-    });
-    if (current) sel.value = current;
-  } catch (_) {}
-}
-
-async function loadFileByPath(path) {
-  const res = await fetch(`/api/files/content?path=${encodeURIComponent(path)}`);
-  if (!res.ok) throw new Error(`Could not load file (HTTP ${res.status})`);
-  return res.json(); // { content, name }
-}
-
-async function loadChatFile() {
-  const path = document.getElementById('chat-file-select').value;
-  if (!path) return;
-  try {
-    const data = await loadFileByPath(path);
-    setChatContext(data.content, data.name);
+    const res = await fetch('/api/library');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { notebooks } = await res.json();
+    state.libraryCache = notebooks;
+    populatePicker(tab);
   } catch (e) {
-    alert(e.message);
+    list.innerHTML = `<p class="picker-loading">Failed to load: ${esc(e.message)}</p>`;
+    return;
+  }
+
+  setTimeout(() => {
+    _pickerOutsideHandler = (e) => {
+      const wrap = document.getElementById(`${tab}-picker-wrap`);
+      if (wrap && !wrap.contains(e.target)) closePicker(tab);
+    };
+    document.addEventListener('click', _pickerOutsideHandler);
+  }, 0);
+}
+
+function closePicker(tab) {
+  const panel = document.getElementById(`${tab}-picker-panel`);
+  if (panel) panel.hidden = true;
+  const trigger = document.getElementById(`${tab}-picker-trigger`);
+  if (trigger) trigger.classList.remove('open');
+  if (_pickerOutsideHandler) {
+    document.removeEventListener('click', _pickerOutsideHandler);
+    _pickerOutsideHandler = null;
   }
 }
 
-async function loadWriteFile() {
-  const path = document.getElementById('write-file-select').value;
-  if (!path) return;
-  try {
-    const data = await loadFileByPath(path);
-    setWriteContext(data.content, data.name);
-  } catch (e) {
-    alert(e.message);
+function populatePicker(tab) {
+  const nbs = state.libraryCache || [];
+  const ids = tab === 'chat' ? state.chatSelectedIds : state.writeSelectedIds;
+  const list = document.getElementById(`${tab}-picker-list`);
+
+  if (nbs.length === 0) {
+    list.innerHTML = '<p class="picker-loading">No transcribed notebooks yet.</p>';
+    return;
+  }
+
+  const allChecked  = nbs.every(nb => ids.has(nb.job_id));
+  const someChecked = nbs.some(nb => ids.has(nb.job_id));
+
+  list.innerHTML = `
+    <label class="picker-row picker-row-all">
+      <input type="checkbox" id="${tab}-all-check"
+             ${allChecked ? 'checked' : ''}
+             onchange="onSelectAll('${tab}', this.checked)">
+      <span class="picker-row-name">Select all</span>
+    </label>
+    <hr class="picker-divider">
+    ${nbs.map(nb => `
+      <label class="picker-row">
+        <input type="checkbox" value="${esc(nb.job_id)}"
+               ${ids.has(nb.job_id) ? 'checked' : ''}
+               onchange="onPickerCheck('${tab}', '${esc(nb.job_id)}', this.checked)">
+        <span class="picker-row-name">${esc(nb.notebook)}</span>
+        ${nb.date ? `<span class="picker-row-meta">${esc(nb.date)}</span>` : ''}
+      </label>
+    `).join('')}
+  `;
+
+  const allCheck = document.getElementById(`${tab}-all-check`);
+  if (allCheck && someChecked && !allChecked) allCheck.indeterminate = true;
+}
+
+function onPickerCheck(tab, jobId, checked) {
+  const ids = tab === 'chat' ? state.chatSelectedIds : state.writeSelectedIds;
+  if (checked) ids.add(jobId); else ids.delete(jobId);
+  updateSelectAll(tab);
+  updatePickerLabel(tab);
+}
+
+function onSelectAll(tab, checked) {
+  const nbs = state.libraryCache || [];
+  const ids = tab === 'chat' ? state.chatSelectedIds : state.writeSelectedIds;
+  nbs.forEach(nb => checked ? ids.add(nb.job_id) : ids.delete(nb.job_id));
+  populatePicker(tab);
+  updatePickerLabel(tab);
+}
+
+function updateSelectAll(tab) {
+  const nbs = state.libraryCache || [];
+  const ids = tab === 'chat' ? state.chatSelectedIds : state.writeSelectedIds;
+  const allCheck = document.getElementById(`${tab}-all-check`);
+  if (!allCheck || nbs.length === 0) return;
+  const allChecked  = nbs.every(nb => ids.has(nb.job_id));
+  const someChecked = nbs.some(nb => ids.has(nb.job_id));
+  allCheck.checked       = allChecked;
+  allCheck.indeterminate = someChecked && !allChecked;
+}
+
+function updatePickerLabel(tab) {
+  const ids   = tab === 'chat' ? state.chatSelectedIds : state.writeSelectedIds;
+  const label = document.getElementById(`${tab}-picker-label`);
+  if (!label) return;
+  if (ids.size === 0) {
+    label.textContent = 'Select notebooks…';
+  } else if (ids.size === 1) {
+    const nb = (state.libraryCache || []).find(n => n.job_id === [...ids][0]);
+    label.textContent = nb ? nb.notebook : '1 notebook selected';
+  } else {
+    label.textContent = `${ids.size} notebooks selected`;
   }
 }
 
-async function uploadMdForChat(input) {
-  const file = input.files[0];
-  if (!file) return;
+async function applyPicker(tab) {
+  const ids = tab === 'chat' ? state.chatSelectedIds : state.writeSelectedIds;
+  if (ids.size === 0) { closePicker(tab); return; }
+
+  const btn      = document.querySelector(`#${tab}-picker-panel .picker-apply-btn`);
+  const origText = btn.textContent;
+  btn.disabled   = true;
+  btn.textContent = 'Loading…';
+
   try {
-    const form = new FormData();
-    form.append('file', file);
-    const res = await fetch('/api/files/upload', { method: 'POST', body: form });
-    if (!res.ok) throw new Error(`Upload failed (HTTP ${res.status})`);
-    const data = await res.json();
-    setChatContext(data.content, data.filename);
-    input.value = '';
+    const items = await Promise.all([...ids].map(async jobId => {
+      const res = await fetch(`/api/library/${encodeURIComponent(jobId)}/content`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const { content } = await res.json();
+      const nb = (state.libraryCache || []).find(n => n.job_id === jobId);
+      return { job_id: jobId, name: nb ? nb.notebook : jobId, content };
+    }));
+
+    const combined = items.map(i => i.content).join('\n\n---\n\n');
+
+    if (tab === 'chat') {
+      state.chatItems   = items;
+      state.chatContext = combined;
+      state.chatHistory = [];
+      document.getElementById('chat-messages').innerHTML = '';
+      document.getElementById('chat-panel').hidden = false;
+      const label = items.length === 1
+        ? `**${items[0].name}**`
+        : `${items.length} notebooks`;
+      appendSystemMessage(`Loaded ${label}. Ask me anything about it.`);
+    } else {
+      state.writeItems   = items;
+      state.writeContext = combined;
+      document.getElementById('write-form').hidden = false;
+    }
+
+    renderPills(tab);
+    closePicker(tab);
   } catch (e) {
-    alert(e.message);
+    alert(`Failed to load: ${e.message}`);
+    btn.disabled    = false;
+    btn.textContent = origText;
   }
 }
 
-async function uploadMdForWrite(input) {
-  const file = input.files[0];
-  if (!file) return;
-  try {
-    const form = new FormData();
-    form.append('file', file);
-    const res = await fetch('/api/files/upload', { method: 'POST', body: form });
-    if (!res.ok) throw new Error(`Upload failed (HTTP ${res.status})`);
-    const data = await res.json();
-    setWriteContext(data.content, data.filename);
-    input.value = '';
-  } catch (e) {
-    alert(e.message);
+function renderPills(tab) {
+  const items = tab === 'chat' ? state.chatItems : state.writeItems;
+  const row   = document.getElementById(`${tab}-pills`);
+  if (!row) return;
+  if (items.length === 0) {
+    row.hidden   = true;
+    row.innerHTML = '';
+    return;
   }
+  row.hidden = false;
+  row.innerHTML = items.map(item => {
+    const safeId = esc(item.job_id || '');
+    return `<span class="nb-pill">${esc(item.name)}<button class="nb-pill-remove" onclick="removePill('${tab}','${safeId}')" aria-label="Remove">×</button></span>`;
+  }).join('');
 }
+
+function removePill(tab, jobId) {
+  const id = jobId || null;
+  if (tab === 'chat') {
+    state.chatItems      = state.chatItems.filter(i => i.job_id !== id);
+    state.chatSelectedIds.delete(id);
+    state.chatContext    = state.chatItems.map(i => i.content).join('\n\n---\n\n') || null;
+    if (state.chatItems.length === 0) {
+      document.getElementById('chat-panel').hidden = true;
+      state.chatHistory = [];
+    }
+  } else {
+    state.writeItems      = state.writeItems.filter(i => i.job_id !== id);
+    state.writeSelectedIds.delete(id);
+    state.writeContext    = state.writeItems.map(i => i.content).join('\n\n---\n\n') || null;
+    if (state.writeItems.length === 0) {
+      document.getElementById('write-form').hidden = true;
+    }
+  }
+  renderPills(tab);
+  updatePickerLabel(tab);
+}
+
+/* ── Shared context setters (used by Process tab + Library card actions) ───── */
 
 function setChatContext(content, name) {
-  state.chatContext  = content;
-  state.chatHistory  = [];
-  const ind = document.getElementById('chat-file-indicator');
-  ind.hidden = false;
-  ind.textContent = `📄 Loaded: ${name}`;
-  document.getElementById('chat-panel').hidden = false;
+  state.chatItems   = [{ job_id: null, name, content }];
+  state.chatContext = content;
+  state.chatHistory = [];
   document.getElementById('chat-messages').innerHTML = '';
+  document.getElementById('chat-panel').hidden = false;
   appendSystemMessage(`Notebook loaded: **${name}**. Ask me anything about it.`);
+  renderPills('chat');
 }
 
 function setWriteContext(content, name) {
+  state.writeItems   = [{ job_id: null, name, content }];
   state.writeContext = content;
-  const ind = document.getElementById('write-file-indicator');
-  ind.hidden = false;
-  ind.textContent = `📄 Loaded: ${name}`;
   document.getElementById('write-form').hidden = false;
+  renderPills('write');
 }
 
 /* ── Tab 2: Chat ───────────────────────────────────────────────────────────── */
@@ -516,4 +646,103 @@ function downloadOutput() {
   a.download = 'notebook-output.md';
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/* ── Tab 0: Library ────────────────────────────────────────────────────────── */
+
+function esc(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+async function loadLibrary() {
+  const grid  = document.getElementById('library-grid');
+  const empty = document.getElementById('library-empty');
+  grid.innerHTML = '<p class="library-loading">Loading…</p>';
+  empty.hidden   = true;
+
+  try {
+    const res = await fetch('/api/library');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { notebooks } = await res.json();
+
+    grid.innerHTML = '';
+    if (notebooks.length === 0) {
+      empty.hidden = false;
+      return;
+    }
+
+    notebooks.forEach(nb => {
+      grid.appendChild(buildLibraryCard(nb));
+    });
+  } catch (e) {
+    grid.innerHTML = `<p class="library-loading">Failed to load library: ${esc(e.message)}</p>`;
+  }
+}
+
+function buildLibraryCard(nb) {
+  const card = document.createElement('div');
+  card.className = 'library-card';
+
+  const metaParts = [];
+  if (nb.pages > 0) metaParts.push(`${nb.pages} page${nb.pages !== 1 ? 's' : ''}`);
+  if (nb.date)      metaParts.push(nb.date);
+  const metaLine = metaParts.join(' · ');
+
+  const tagsHTML = (nb.tags && nb.tags.length > 0)
+    ? nb.tags.map(t => `<span class="tag-pill">${esc(t)}</span>`).join('')
+    : '';
+
+  const jobEnc = encodeURIComponent(nb.job_id);
+
+  card.innerHTML = `
+    <div class="library-card-header">
+      <div>
+        <div class="library-title">${esc(nb.notebook)}</div>
+        ${metaLine ? `<div class="library-meta">${esc(metaLine)}</div>` : ''}
+      </div>
+      <div class="library-actions">
+        <button class="btn-secondary" data-action="chat" data-job="${esc(nb.job_id)}">Open in Chat</button>
+        <button class="btn-secondary" data-action="write" data-job="${esc(nb.job_id)}">Open in Write</button>
+        <a class="btn-secondary" href="/api/library/${jobEnc}/download" download="${esc(nb.combined_md)}">Download .md</a>
+      </div>
+    </div>
+    <div class="library-tags" id="tags-${esc(nb.job_id)}">${tagsHTML}</div>
+  `;
+
+  card.querySelector('[data-action="chat"]').addEventListener('click', () =>
+    libraryOpenIn(nb.job_id, 'chat')
+  );
+  card.querySelector('[data-action="write"]').addEventListener('click', () =>
+    libraryOpenIn(nb.job_id, 'write')
+  );
+
+  return card;
+}
+
+async function libraryOpenIn(jobId, tab) {
+  try {
+    const res = await fetch(`/api/library/${encodeURIComponent(jobId)}/content`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const { content, name } = await res.json();
+    const nb          = (state.libraryCache || []).find(n => n.job_id === jobId);
+    const displayName = nb ? nb.notebook : name;
+
+    if (tab === 'chat') {
+      state.chatSelectedIds = new Set([jobId]);
+      setChatContext(content, displayName);
+      state.chatItems[0].job_id = jobId;   // enable pill × removal
+    } else {
+      state.writeSelectedIds = new Set([jobId]);
+      setWriteContext(content, displayName);
+      state.writeItems[0].job_id = jobId;
+    }
+    renderPills(tab);
+    switchTab(tab);
+  } catch (e) {
+    alert(`Could not load notebook: ${e.message}`);
+  }
 }

@@ -11,8 +11,9 @@ import asyncio
 import base64
 import json
 import os
+import re
 import traceback
-import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator
 
@@ -245,7 +246,7 @@ async def run_job(job_id: str, pdf_path: Path, notebook: str, date: str, topic: 
             await emit({"type": "status", "message": "Combining pages into one file…"})
             parts = [p.read_text(encoding="utf-8") for p in sorted(saved_notes)]
             combined = "\n\n---\n\n".join(parts)
-            combined_path = job_dir / f"{notebook}_complete.md"
+            combined_path = job_dir / f"{notebook}_{date}_complete.md"
             combined_path.write_text(combined, encoding="utf-8")
             job["combined_path"] = str(combined_path)
             job["combined_name"] = combined_path.name
@@ -281,13 +282,17 @@ async def upload_pdf(
         if not file.filename or not file.filename.lower().endswith(".pdf"):
             raise HTTPException(400, "Only PDF files are supported")
 
-        job_id = uuid.uuid4().hex[:8]
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        job_id = f"{notebook}_{date}_{timestamp}"
         job_dir = DATA_DIR / "jobs" / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
 
         pdf_path = job_dir / file.filename
         content = await file.read()
         pdf_path.write_bytes(content)
+
+        meta = {"notebook": notebook, "date": date, "topic": topic, "job_id": job_id}
+        (job_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
         jobs[job_id] = {
             "id": job_id,
@@ -506,6 +511,150 @@ async def get_file_content(path: str):
     except ValueError:
         raise HTTPException(403, "Access denied")
     return {"content": file_path.read_text(encoding="utf-8"), "name": file_path.name}
+
+
+# ── Library routes ─────────────────────────────────────────────────────────────
+
+def _resolve_job_dir(job_id: str) -> Path:
+    """Safely resolve a job directory, blocking path traversal."""
+    jobs_base = (DATA_DIR / "jobs").resolve()
+    job_dir = jobs_base / job_id
+    try:
+        job_dir.resolve().relative_to(jobs_base)
+    except ValueError:
+        raise HTTPException(403, "Access denied")
+    if not job_dir.exists() or not job_dir.is_dir():
+        raise HTTPException(404, "Job not found")
+    return job_dir
+
+
+async def _generate_tags(job_dir: Path, combined_path: Path) -> list[str]:
+    """Return cached tags or generate + cache them via Claude."""
+    tags_path = job_dir / "tags.json"
+    if tags_path.exists():
+        return json.loads(tags_path.read_text(encoding="utf-8"))
+
+    content = combined_path.read_text(encoding="utf-8")[:6000]
+    response = await client.messages.create(
+        model=DEFAULT_MODEL,
+        max_tokens=256,
+        messages=[{
+            "role": "user",
+            "content": (
+                "Extract exactly 10 short topic tags from this notebook transcription. "
+                "Return only a JSON array of 10 strings, each 1-3 words. No other text.\n\n"
+                + content
+            ),
+        }],
+    )
+    raw = response.content[0].text.strip()
+    try:
+        tags = json.loads(raw)
+        if not isinstance(tags, list):
+            raise ValueError
+        tags = [str(t) for t in tags[:10]]
+    except (json.JSONDecodeError, ValueError):
+        m = re.search(r"\[.*?\]", raw, re.DOTALL)
+        tags = json.loads(m.group()) if m else []
+
+    tags_path.write_text(json.dumps(tags), encoding="utf-8")
+    return tags
+
+
+@app.get("/api/library")
+async def list_library():
+    jobs_dir = DATA_DIR / "jobs"
+    entries = []
+    needs_tags: list[tuple[int, Path, Path]] = []  # (entry index, job_dir, combined_path)
+
+    if not jobs_dir.exists():
+        return {"notebooks": []}
+
+    for job_dir in sorted(jobs_dir.iterdir(), reverse=True):
+        if not job_dir.is_dir():
+            continue
+        try:
+            combined_files = list(job_dir.glob("*_complete.md"))
+            if not combined_files:
+                continue
+            combined_path = combined_files[0]
+
+            meta_path = job_dir / "meta.json"
+            if meta_path.exists():
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                notebook_name = meta.get("notebook", job_dir.name)
+                date_str = meta.get("date", "")
+                topic_str = meta.get("topic", "")
+            else:
+                stem = combined_path.stem.removesuffix("_complete")
+                notebook_name = stem
+                date_str = ""
+                topic_str = ""
+
+            notes_dir = job_dir / "notes"
+            page_count = len(list(notes_dir.glob("*.md"))) if notes_dir.exists() else 0
+
+            tags_path = job_dir / "tags.json"
+            if tags_path.exists():
+                tags: list[str] | None = json.loads(tags_path.read_text(encoding="utf-8"))
+            else:
+                tags = None
+                needs_tags.append((len(entries), job_dir, combined_path))
+
+            entries.append({
+                "job_id": job_dir.name,
+                "notebook": notebook_name,
+                "date": date_str,
+                "topic": topic_str,
+                "pages": page_count,
+                "combined_md": combined_path.name,
+                "tags": tags,
+            })
+        except Exception as e:
+            print(f"[library] skipping {job_dir.name}: {e}")
+
+    # Generate tags concurrently for all entries that need them
+    if needs_tags:
+        async def _gen(idx: int, jd: Path, cp: Path) -> None:
+            try:
+                entries[idx]["tags"] = await _generate_tags(jd, cp)
+            except Exception as e:
+                print(f"[library] tag gen failed for {jd.name}: {e}")
+                entries[idx]["tags"] = []
+
+        await asyncio.gather(*[_gen(i, jd, cp) for i, jd, cp in needs_tags])
+
+    return {"notebooks": entries}
+
+
+@app.get("/api/library/{job_id}/tags")
+async def get_or_generate_tags(job_id: str):
+    job_dir = _resolve_job_dir(job_id)
+    combined_files = list(job_dir.glob("*_complete.md"))
+    if not combined_files:
+        raise HTTPException(400, "No combined file found")
+    tags = await _generate_tags(job_dir, combined_files[0])
+    return {"tags": tags}
+
+
+@app.get("/api/library/{job_id}/content")
+async def library_content(job_id: str):
+    job_dir = _resolve_job_dir(job_id)
+    combined_files = list(job_dir.glob("*_complete.md"))
+    if not combined_files:
+        raise HTTPException(400, "No combined file found")
+    path = combined_files[0]
+    return {"content": path.read_text(encoding="utf-8"), "name": path.name}
+
+
+@app.get("/api/library/{job_id}/download")
+async def library_download(job_id: str):
+    job_dir = _resolve_job_dir(job_id)
+    combined_files = list(job_dir.glob("*_complete.md"))
+    if not combined_files:
+        raise HTTPException(400, "No combined file found")
+    path = combined_files[0]
+    return FileResponse(path, filename=path.name, media_type="text/markdown")
 
 
 # ── Static files (must be last) ────────────────────────────────────────────────

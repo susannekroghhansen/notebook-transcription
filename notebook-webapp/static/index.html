@@ -3,25 +3,48 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Notebook Transcription</title>
+  <title>Notebook</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
   <header>
     <div class="header-inner">
-      <span class="logo">📓</span>
-      <h1>Notebook Transcription</h1>
+      <span class="logo">
+        <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <!-- notebook body -->
+          <rect x="10" y="6" width="28" height="36" rx="3" fill="#E8C5C0"/>
+          <rect x="13" y="6" width="25" height="36" rx="2" fill="#FAF7F5" stroke="#D4A09A" stroke-width="1.2"/>
+          <!-- spine binding dots -->
+          <circle cx="11.5" cy="16" r="2" fill="#D4A09A"/>
+          <circle cx="11.5" cy="24" r="2" fill="#D4A09A"/>
+          <circle cx="11.5" cy="32" r="2" fill="#D4A09A"/>
+          <!-- ruled lines -->
+          <line x1="17" y1="18" x2="34" y2="18" stroke="#E8C5C0" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="17" y1="23" x2="34" y2="23" stroke="#E8C5C0" stroke-width="1.2" stroke-linecap="round"/>
+          <line x1="17" y1="28" x2="28" y2="28" stroke="#E8C5C0" stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+      </span>
+      <h1>Notebook</h1>
     </div>
   </header>
 
   <nav class="tabs">
+    <button class="tab-btn" onclick="switchTab('library')">Library</button>
     <button class="tab-btn active" onclick="switchTab('process')">Process</button>
     <button class="tab-btn" onclick="switchTab('chat')">Chat</button>
     <button class="tab-btn" onclick="switchTab('write')">Write</button>
   </nav>
 
   <main>
+
+    <!-- ── Tab 0: Library ─────────────────────────────────────────────────── -->
+    <section id="tab-library" class="tab" hidden>
+      <div id="library-grid" class="library-grid"></div>
+      <div id="library-empty" class="library-empty" hidden>
+        <p>No transcribed notebooks yet. Process a PDF to get started.</p>
+      </div>
+    </section>
 
     <!-- ── Tab 1: Process ──────────────────────────────────────────────────── -->
     <section id="tab-process" class="tab active">
@@ -64,7 +87,7 @@
         </div>
 
         <button class="btn-primary" id="process-btn" onclick="startProcessing()" disabled>
-          Start Processing
+          Transcribe notebook
         </button>
       </div>
 
@@ -91,17 +114,21 @@
 
       <div class="card">
         <h2>Chat with Your Notebook</h2>
-        <div class="file-loader">
-          <select id="chat-file-select" onchange="loadChatFile()">
-            <option value="">— select a notebook file —</option>
-          </select>
-          <span class="or-sep">or</span>
-          <label class="btn-secondary upload-label">
-            Upload .md
-            <input type="file" accept=".md" hidden onchange="uploadMdForChat(this)">
-          </label>
+        <div class="nb-picker-wrap" id="chat-picker-wrap">
+          <button class="nb-picker-trigger" id="chat-picker-trigger" onclick="togglePicker('chat')">
+            <span id="chat-picker-label">Select notebooks…</span>
+            <span class="picker-chevron">▾</span>
+          </button>
+          <div class="nb-picker-panel" id="chat-picker-panel" hidden>
+            <div class="nb-picker-list" id="chat-picker-list">
+              <p class="picker-loading">Loading…</p>
+            </div>
+            <div class="picker-footer">
+              <button class="btn-primary picker-apply-btn" onclick="applyPicker('chat')">Load into chat</button>
+            </div>
+          </div>
         </div>
-        <div id="chat-file-indicator" class="file-indicator" hidden></div>
+        <div class="nb-pills-row" id="chat-pills" hidden></div>
       </div>
 
       <div class="card chat-card" id="chat-panel" hidden>
@@ -128,17 +155,21 @@
 
       <div class="card">
         <h2>Write from Your Notebook</h2>
-        <div class="file-loader">
-          <select id="write-file-select" onchange="loadWriteFile()">
-            <option value="">— select a notebook file —</option>
-          </select>
-          <span class="or-sep">or</span>
-          <label class="btn-secondary upload-label">
-            Upload .md
-            <input type="file" accept=".md" hidden onchange="uploadMdForWrite(this)">
-          </label>
+        <div class="nb-picker-wrap" id="write-picker-wrap">
+          <button class="nb-picker-trigger" id="write-picker-trigger" onclick="togglePicker('write')">
+            <span id="write-picker-label">Select notebooks…</span>
+            <span class="picker-chevron">▾</span>
+          </button>
+          <div class="nb-picker-panel" id="write-picker-panel" hidden>
+            <div class="nb-picker-list" id="write-picker-list">
+              <p class="picker-loading">Loading…</p>
+            </div>
+            <div class="picker-footer">
+              <button class="btn-primary picker-apply-btn" onclick="applyPicker('write')">Load for writing</button>
+            </div>
+          </div>
         </div>
-        <div id="write-file-indicator" class="file-indicator" hidden></div>
+        <div class="nb-pills-row" id="write-pills" hidden></div>
 
         <div id="write-form" hidden>
           <div class="form-group" style="margin-top:20px">
