@@ -6,3 +6,9 @@ Original Scans/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# py2app build artefacts
+build/
+dist/
+*.app/
+*.app.old/

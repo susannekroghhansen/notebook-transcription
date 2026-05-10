@@ -12,6 +12,9 @@ import glob
 import os
 from collections import defaultdict
 
+import sys
+sys.setrecursionlimit(10000)
+
 from setuptools import setup
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -69,6 +72,10 @@ OPTIONS = {
         "idna",
         "click",
         "typing_extensions",
+	"faster_whisper",
+        "ctranslate2",
+        "av",
+        "onnxruntime",
     ],
 
     # Explicit modules that py2app's static analyser might miss.
@@ -104,5 +111,5 @@ setup(
     app=APP,
     data_files=DATA_FILES,
     options={"py2app": OPTIONS},
-    setup_requires=["py2app"],
+    
 )
