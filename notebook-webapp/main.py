@@ -170,9 +170,9 @@ async def _get_whisper_model():
             except ImportError:
                 device = "cpu"
             compute_type = "float16" if device == "cuda" else "int8"
-            print(f"[Whisper] Loading medium model → {device} ({compute_type}) …")
+            print(f"[Whisper] Loading large-v3 model → {device} ({compute_type}) …")
             model = WhisperModel(
-                "medium",
+                "large-v3",
                 device=device,
                 compute_type=compute_type,
                 download_root=str(MODELS_DIR),
