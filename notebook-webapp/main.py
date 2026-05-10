@@ -12,6 +12,7 @@ import base64
 import json
 import os
 import re
+import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +48,9 @@ SD_MODEL_ID = "runwayml/stable-diffusion-v1-5"
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 Image.MAX_IMAGE_PIXELS = None
+
+VOICE_MAX_BYTES           = 500 * 1024 * 1024  # 500 MB
+VOICE_ACCEPTED_EXTENSIONS = {".mp3", ".m4a", ".wav", ".mp4", ".webm"}
 
 SYSTEM_PROMPT = """You are an expert visual analyst specialising in sketchnotes, visual thinking,
 and hand-drawn notebook documentation. Your task is to produce rich, structured markdown
@@ -88,12 +92,13 @@ client = anthropic.AsyncAnthropic(
     api_key=os.environ.get("ANTHROPIC_API_KEY")
 )
 
-# In-memory job store: job_id -> job dict
+# In-memory job stores
 jobs: dict[str, dict] = {}
+voice_jobs: dict[str, dict] = {}
 
 # Ensure data directories exist at startup
 for d in [DATA_DIR, DATA_DIR / "uploads", DATA_DIR / "jobs",
-          ILLUSTRATIONS_DIR, MODELS_DIR]:
+          ILLUSTRATIONS_DIR, MODELS_DIR, DATA_DIR / "voice"]:
     d.mkdir(parents=True, exist_ok=True)
 
 # ── Stable Diffusion pipeline (lazy-loaded on first request) ───────────────────
@@ -136,6 +141,47 @@ async def _get_sd_pipeline():
 
         _sd_pipeline = await asyncio.to_thread(_load)
         return _sd_pipeline
+
+
+# ── Whisper model (lazy-loaded on first voice transcription) ───────────────────
+
+_whisper_model     = None
+_whisper_load_lock = asyncio.Lock()
+
+
+async def _get_whisper_model():
+    """Return the loaded Whisper model, loading it on first call."""
+    global _whisper_model
+    if _whisper_model is not None:
+        return _whisper_model
+
+    async with _whisper_load_lock:
+        if _whisper_model is not None:
+            return _whisper_model
+
+        def _load():
+            from faster_whisper import WhisperModel
+            # CTranslate2 (the engine behind faster-whisper) does not support Apple
+            # Metal/MPS.  On Apple Silicon it runs on CPU with Accelerate-framework
+            # BLAS; on Linux/Windows with an NVIDIA card it uses CUDA.
+            try:
+                import torch
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+            except ImportError:
+                device = "cpu"
+            compute_type = "float16" if device == "cuda" else "int8"
+            print(f"[Whisper] Loading medium model → {device} ({compute_type}) …")
+            model = WhisperModel(
+                "medium",
+                device=device,
+                compute_type=compute_type,
+                download_root=str(MODELS_DIR),
+            )
+            print("[Whisper] Model ready")
+            return model
+
+        _whisper_model = await asyncio.to_thread(_load)
+        return _whisper_model
 
 
 # ── Helper functions ───────────────────────────────────────────────────────────
@@ -316,6 +362,102 @@ async def run_job(job_id: str, pdf_path: Path, notebook: str, date: str, topic: 
     except Exception as e:
         job["status"] = "error"
         job["error"] = str(e)
+        await emit({"type": "error", "message": str(e)})
+
+
+# ── Voice background job ───────────────────────────────────────────────────────
+
+async def run_voice_job(job_id: str, audio_path: Path, title: str, date: str):
+    job   = voice_jobs[job_id]
+    queue: asyncio.Queue = job["queue"]
+
+    async def emit(event: dict):
+        await queue.put(event)
+
+    try:
+        await emit({"type": "status", "message": "Loading transcription model…"})
+        model = await _get_whisper_model()
+
+        loop      = asyncio.get_running_loop()
+        seg_queue: asyncio.Queue = asyncio.Queue()
+
+        def _transcribe():
+            try:
+                segments, info = model.transcribe(str(audio_path), beam_size=5)
+                loop.call_soon_threadsafe(
+                    seg_queue.put_nowait,
+                    {"type": "info", "language": info.language, "duration": info.duration},
+                )
+                text_parts: list[str] = []
+                for seg in segments:
+                    cleaned = seg.text.strip()
+                    if cleaned:
+                        text_parts.append(cleaned)
+                    loop.call_soon_threadsafe(
+                        seg_queue.put_nowait,
+                        {"type": "segment", "time": seg.end, "accumulated": " ".join(text_parts)},
+                    )
+                loop.call_soon_threadsafe(
+                    seg_queue.put_nowait,
+                    {"type": "done_segments", "full_text": " ".join(text_parts)},
+                )
+            except Exception as exc:
+                loop.call_soon_threadsafe(
+                    seg_queue.put_nowait,
+                    {"type": "thread_error", "message": str(exc)},
+                )
+
+        thread = threading.Thread(target=_transcribe, daemon=True)
+        thread.start()
+
+        total_duration = 0.0
+        full_text      = ""
+        while True:
+            seg = await seg_queue.get()
+            if seg["type"] == "info":
+                total_duration = seg["duration"]
+                lang = seg["language"].upper()
+                mins = round(total_duration / 60, 1)
+                await emit({
+                    "type": "status",
+                    "message": (
+                        f"Detected language: {lang} — transcribing {mins} min of audio…"
+                        " this may take several minutes"
+                    ),
+                })
+            elif seg["type"] == "segment":
+                full_text = seg["accumulated"]
+                await emit({
+                    "type": "transcript_update",
+                    "text": full_text,
+                    "time": seg["time"],
+                    "duration": total_duration,
+                })
+            elif seg["type"] == "done_segments":
+                full_text = seg["full_text"]
+                break
+            elif seg["type"] == "thread_error":
+                raise RuntimeError(seg["message"])
+
+        thread.join(timeout=10)
+
+        display_title = title or "Voice Recording"
+        safe_title    = re.sub(r"[^\w\-]", "_", title or "recording")
+        safe_date     = re.sub(r"[^\w\-]", "_", date  or "undated")
+        md_content    = f"# {display_title}\n\n{full_text}\n"
+        md_filename   = f"{safe_title}_{safe_date}_transcript.md"
+        md_path       = audio_path.parent / md_filename
+        md_path.write_text(md_content, encoding="utf-8")
+
+        job["status"]  = "done"
+        job["content"] = md_content
+        job["md_path"] = str(md_path)
+        job["md_name"] = md_filename
+        await emit({"type": "done"})
+
+    except Exception as e:
+        job["status"] = "error"
+        job["error"]  = str(e)
         await emit({"type": "error", "message": str(e)})
 
 
@@ -803,6 +945,111 @@ async def illustrate_history():
             for f in files
         ]
     }
+
+
+# ── Voice routes ───────────────────────────────────────────────────────────────
+
+@app.post("/api/voice/upload")
+async def upload_audio(
+    file:  UploadFile = File(...),
+    title: str = Form(default=""),
+    date:  str = Form(default=""),
+):
+    try:
+        ext = Path(file.filename or "").suffix.lower()
+        if ext not in VOICE_ACCEPTED_EXTENSIONS:
+            raise HTTPException(400, "Unsupported format. Accepted: mp3, m4a, wav, mp4, webm")
+
+        content = await file.read()
+        if len(content) > VOICE_MAX_BYTES:
+            raise HTTPException(400, "File exceeds 500 MB limit")
+
+        timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_title = re.sub(r"[^\w\-]", "_", title or "recording")
+        job_id     = f"voice_{safe_title}_{timestamp}"
+        job_dir    = DATA_DIR / "voice" / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+
+        audio_path = job_dir / (file.filename or f"audio{ext}")
+        audio_path.write_bytes(content)
+
+        voice_jobs[job_id] = {
+            "id":       job_id,
+            "status":   "pending",
+            "filename": file.filename,
+            "content":  None,
+            "md_path":  None,
+            "md_name":  None,
+            "error":    None,
+            "queue":    asyncio.Queue(),
+        }
+
+        asyncio.create_task(run_voice_job(job_id, audio_path, title, date))
+        return {"job_id": job_id}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(500, f"Upload failed: {e}") from e
+
+
+@app.get("/api/voice/stream/{job_id}")
+async def voice_stream(job_id: str):
+    if job_id not in voice_jobs:
+        raise HTTPException(404, "Job not found")
+
+    job   = voice_jobs[job_id]
+    queue: asyncio.Queue = job["queue"]
+
+    async def generate() -> AsyncGenerator[str, None]:
+        snapshot = {k: v for k, v in job.items() if k not in ("queue", "content")}
+        yield f"data: {json.dumps({'type': 'snapshot', 'job': snapshot})}\n\n"
+
+        if job["status"] in ("done", "error"):
+            terminal: dict = {"type": job["status"]}
+            if job["status"] == "error":
+                terminal["message"] = job.get("error", "Unknown error")
+            yield f"data: {json.dumps(terminal)}\n\n"
+            return
+
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("type") in ("done", "error"):
+                    break
+            except asyncio.TimeoutError:
+                yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+                if job["status"] in ("done", "error"):
+                    break
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/voice/content/{job_id}")
+async def voice_content(job_id: str):
+    if job_id not in voice_jobs:
+        raise HTTPException(404, "Job not found")
+    job = voice_jobs[job_id]
+    if not job.get("content"):
+        raise HTTPException(400, "Transcription not complete yet")
+    return {"content": job["content"], "name": job.get("md_name", "transcript.md")}
+
+
+@app.get("/api/voice/download/{job_id}")
+async def voice_download(job_id: str):
+    if job_id not in voice_jobs:
+        raise HTTPException(404, "Job not found")
+    job  = voice_jobs[job_id]
+    path = job.get("md_path")
+    if not path or not Path(path).exists():
+        raise HTTPException(400, "No transcript file available yet")
+    return FileResponse(Path(path), filename=job["md_name"], media_type="text/markdown")
 
 
 # ── Static files (must be last) ────────────────────────────────────────────────

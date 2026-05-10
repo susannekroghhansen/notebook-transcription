@@ -234,13 +234,32 @@ select { cursor: pointer; }
 .link-btn:hover { color: var(--accent-h); }
 .link-btn.small { font-size: 12px; }
 
-/* ── Process button (full-width, larger) ───────────────────────────────────── */
+/* ── Process / Voice buttons (full-width, larger) ──────────────────────────── */
 
-#process-btn {
+#process-btn,
+#voice-btn {
   width: 100%;
   padding: 14px 32px;
   font-size: 16px;
   margin-top: 2rem;
+}
+
+/* ── Live transcript (Voice tab) ───────────────────────────────────────────── */
+
+.voice-transcript-live {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--text);
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent-h);
+  border-radius: 8px;
+  margin-bottom: 16px;
 }
 
 /* ── Progress / pages list ─────────────────────────────────────────────────── */

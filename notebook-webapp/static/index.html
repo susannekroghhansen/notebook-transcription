@@ -32,6 +32,7 @@
   <nav class="tabs">
     <button class="tab-btn" onclick="switchTab('library')">Library</button>
     <button class="tab-btn active" onclick="switchTab('process')">Process</button>
+    <button class="tab-btn" onclick="switchTab('voice')">Voice</button>
     <button class="tab-btn" onclick="switchTab('chat')">Chat</button>
     <button class="tab-btn" onclick="switchTab('write')">Write</button>
     <button class="tab-btn" onclick="switchTab('illustrate')">Illustrate</button>
@@ -106,6 +107,67 @@
           </div>
         </div>
         <div id="error-banner" hidden class="error-banner"></div>
+      </div>
+
+    </section>
+
+    <!-- ── Tab: Voice ────────────────────────────────────────────────────────── -->
+    <section id="tab-voice" class="tab" hidden>
+
+      <div class="card">
+        <h2>Transcribe a Recording</h2>
+
+        <div class="upload-area" id="voice-upload-area"
+             ondragover="event.preventDefault(); this.classList.add('drag-over')"
+             ondragleave="this.classList.remove('drag-over')"
+             ondrop="handleVoiceDrop(event)">
+          <input type="file" id="voice-input" accept=".mp3,.m4a,.wav,.mp4,.webm" hidden
+                 onchange="handleVoiceFileSelect(this.files[0])">
+          <div id="voice-upload-idle">
+            <div class="upload-icon">🎙</div>
+            <p>Drag &amp; drop an audio file, or
+              <button class="link-btn" onclick="document.getElementById('voice-input').click()">browse</button>
+            </p>
+            <p class="hint">mp3 · m4a · wav · mp4 · webm · max 500 MB</p>
+          </div>
+          <div id="voice-upload-ready" hidden>
+            <div class="upload-icon">✅</div>
+            <p id="voice-selected-filename" class="filename"></p>
+            <button class="link-btn small" onclick="clearVoice()">Remove</button>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label for="voice-title">Title <span class="optional">(optional)</span></label>
+            <input type="text" id="voice-title" placeholder="e.g. Interview, Team meeting">
+          </div>
+          <div class="form-group">
+            <label for="voice-date">Date <span class="optional">(optional)</span></label>
+            <input type="text" id="voice-date" placeholder="e.g. 2026-05">
+          </div>
+        </div>
+
+        <button class="btn-primary" id="voice-btn" onclick="startVoiceTranscription()" disabled>
+          Transcribe recording
+        </button>
+      </div>
+
+      <!-- Progress card -->
+      <div class="card" id="voice-progress-card" hidden>
+        <h2>Transcribing</h2>
+        <p id="voice-status-msg" class="status-msg"></p>
+        <div id="voice-transcript-live" class="voice-transcript-live" hidden></div>
+        <div id="voice-done-section" hidden class="done-section">
+          <p class="success-banner">Transcription complete!</p>
+          <div class="done-actions">
+            <button class="btn-primary" onclick="copyVoiceTranscript()">Copy text</button>
+            <button class="btn-secondary" onclick="downloadVoiceTranscript()">⬇ Download .md</button>
+            <button class="btn-secondary" onclick="openVoiceInChat()">Open in Chat</button>
+            <button class="btn-secondary" onclick="openVoiceInWrite()">Open in Write</button>
+          </div>
+        </div>
+        <div id="voice-error-banner" hidden class="error-banner"></div>
       </div>
 
     </section>

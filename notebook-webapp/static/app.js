@@ -1,26 +1,32 @@
 /* ── State ─────────────────────────────────────────────────────────────────── */
 
 const state = {
-  // Tab 1
+  // Tab: Process
   selectedFile:      null,
   currentJobId:      null,
   eventSource:       null,
-  // Shared context
+  // Shared context (last finished transcription, either source)
   lastContent:       null,
   lastContentName:   null,
-  // Tab 2 – Chat
+  // Tab: Voice
+  voiceSelectedFile:    null,
+  voiceCurrentJobId:    null,
+  voiceEventSource:     null,
+  voiceLastContent:     null,
+  voiceLastContentName: null,
+  // Tab: Chat
   chatContext:       null,
   chatHistory:       [],
   chatItems:         [],          // [{job_id, name, content}] currently loaded
   chatSelectedIds:   new Set(),   // checked in picker (before applying)
-  // Tab 3 – Write
+  // Tab: Write
   writeContext:      null,
   lastGeneratedText: '',
   writeItems:        [],
   writeSelectedIds:  new Set(),
   // Shared picker
   libraryCache:          null,    // [{job_id, notebook, date, …}]
-  // Tab 4 – Illustrate
+  // Tab: Illustrate
   illustrationHistory:   [],      // [{url, filename, prompt}] — newest first, max 5
 };
 
@@ -28,7 +34,7 @@ const state = {
 
 function switchTab(name) {
   document.querySelectorAll('.tab-btn').forEach((btn, i) => {
-    const names = ['library', 'process', 'chat', 'write', 'illustrate'];
+    const names = ['library', 'process', 'voice', 'chat', 'write', 'illustrate'];
     btn.classList.toggle('active', names[i] === name);
   });
   document.querySelectorAll('.tab').forEach(el => {
@@ -882,4 +888,184 @@ function renderIllusHistory() {
       <img src="${esc(item.url)}" alt="Illustration ${i + 1}" class="illus-thumb">
     </button>
   `).join('');
+}
+
+/* ── Tab: Voice ────────────────────────────────────────────────────────────── */
+
+function handleVoiceDrop(e) {
+  e.preventDefault();
+  document.getElementById('voice-upload-area').classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (file) handleVoiceFileSelect(file);
+}
+
+function handleVoiceFileSelect(file) {
+  if (!file) return;
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (!['mp3', 'm4a', 'wav', 'mp4', 'webm'].includes(ext)) {
+    showVoiceError(`Unsupported format: .${ext}. Please use mp3, m4a, wav, mp4, or webm.`);
+    return;
+  }
+  state.voiceSelectedFile = file;
+  document.getElementById('voice-upload-idle').hidden  = true;
+  document.getElementById('voice-upload-ready').hidden = false;
+  document.getElementById('voice-selected-filename').textContent = file.name;
+  document.getElementById('voice-btn').disabled = false;
+}
+
+function clearVoice() {
+  state.voiceSelectedFile = null;
+  document.getElementById('voice-upload-idle').hidden  = false;
+  document.getElementById('voice-upload-ready').hidden = true;
+  document.getElementById('voice-input').value = '';
+  document.getElementById('voice-btn').disabled = true;
+}
+
+async function startVoiceTranscription() {
+  if (!state.voiceSelectedFile) return;
+
+  const btn = document.getElementById('voice-btn');
+  btn.disabled    = true;
+  btn.textContent = 'Uploading…';
+
+  const form = new FormData();
+  form.append('file',  state.voiceSelectedFile);
+  form.append('title', document.getElementById('voice-title').value || '');
+  form.append('date',  document.getElementById('voice-date').value  || '');
+
+  try {
+    const res = await fetch('/api/voice/upload', { method: 'POST', body: form });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${res.status}`);
+    }
+    const { job_id } = await res.json();
+    state.voiceCurrentJobId = job_id;
+
+    showVoiceProgressCard();
+    btn.textContent = 'Transcribing…';
+    connectVoiceSSE(job_id);
+  } catch (err) {
+    btn.disabled    = false;
+    btn.textContent = 'Transcribe recording';
+    showVoiceError(err.message);
+  }
+}
+
+function showVoiceProgressCard() {
+  const card = document.getElementById('voice-progress-card');
+  card.hidden = false;
+  document.getElementById('voice-done-section').hidden      = true;
+  document.getElementById('voice-error-banner').hidden      = true;
+  document.getElementById('voice-transcript-live').hidden   = true;
+  document.getElementById('voice-transcript-live').textContent = '';
+  document.getElementById('voice-status-msg').textContent   = '';
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function connectVoiceSSE(jobId) {
+  if (state.voiceEventSource) state.voiceEventSource.close();
+  const es = new EventSource(`/api/voice/stream/${jobId}`);
+  state.voiceEventSource = es;
+  es.onmessage = (e) => {
+    const event = JSON.parse(e.data);
+    handleVoiceSSEEvent(event);
+  };
+}
+
+function handleVoiceSSEEvent(event) {
+  switch (event.type) {
+
+    case 'snapshot': {
+      const job = event.job;
+      if (job.status === 'done') {
+        fetchAndStoreVoiceTranscript(job.id || state.voiceCurrentJobId)
+          .then(() => showVoiceDoneSection());
+        if (state.voiceEventSource) state.voiceEventSource.close();
+      } else if (job.status === 'error') {
+        showVoiceError(job.error || 'Unknown error');
+        if (state.voiceEventSource) state.voiceEventSource.close();
+      }
+      break;
+    }
+
+    case 'status':
+      document.getElementById('voice-status-msg').textContent = event.message || '';
+      break;
+
+    case 'transcript_update': {
+      const live = document.getElementById('voice-transcript-live');
+      live.hidden      = false;
+      live.textContent = event.text || '';
+      live.scrollTop   = live.scrollHeight;
+      break;
+    }
+
+    case 'done':
+      fetchAndStoreVoiceTranscript(state.voiceCurrentJobId).then(() => {
+        showVoiceDoneSection();
+        document.getElementById('voice-btn').textContent = 'Transcribe recording';
+        if (state.voiceEventSource) state.voiceEventSource.close();
+      });
+      break;
+
+    case 'error':
+      showVoiceError(event.message || 'Transcription failed');
+      document.getElementById('voice-btn').disabled    = false;
+      document.getElementById('voice-btn').textContent = 'Transcribe recording';
+      if (state.voiceEventSource) state.voiceEventSource.close();
+      break;
+
+    case 'heartbeat':
+      break;
+  }
+}
+
+async function fetchAndStoreVoiceTranscript(jobId) {
+  try {
+    const res = await fetch(`/api/voice/content/${jobId}`);
+    if (res.ok) {
+      const data = await res.json();
+      state.voiceLastContent     = data.content;
+      state.voiceLastContentName = data.name;
+    }
+  } catch (_) {}
+}
+
+function showVoiceDoneSection() {
+  document.getElementById('voice-done-section').hidden = false;
+  document.getElementById('voice-status-msg').textContent = '';
+}
+
+function showVoiceError(msg) {
+  const el = document.getElementById('voice-error-banner');
+  el.hidden = false;
+  el.textContent = `Error: ${msg}`;
+}
+
+function copyVoiceTranscript() {
+  if (!state.voiceLastContent) return;
+  navigator.clipboard.writeText(state.voiceLastContent).then(() => {
+    const btn = event.target;
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+}
+
+function downloadVoiceTranscript() {
+  if (!state.voiceCurrentJobId) return;
+  window.location.href = `/api/voice/download/${state.voiceCurrentJobId}`;
+}
+
+function openVoiceInChat() {
+  if (!state.voiceLastContent) return;
+  setChatContext(state.voiceLastContent, state.voiceLastContentName || 'Voice Recording');
+  switchTab('chat');
+}
+
+function openVoiceInWrite() {
+  if (!state.voiceLastContent) return;
+  setWriteContext(state.voiceLastContent, state.voiceLastContentName || 'Voice Recording');
+  switchTab('write');
 }
