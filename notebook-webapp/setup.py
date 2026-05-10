@@ -85,8 +85,8 @@ OPTIONS = {
 
     # macOS app metadata.
     "plist": {
-        "CFBundleName": "Notebook App",
-        "CFBundleDisplayName": "Notebook App",
+        "CFBundleName": "Longhand",
+        "CFBundleDisplayName": "Longhand",
         "CFBundleIdentifier": "com.notebook.app",
         "CFBundleVersion": "1.0.0",
         "CFBundleShortVersionString": "1.0.0",

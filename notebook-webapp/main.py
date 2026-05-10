@@ -82,7 +82,7 @@ understand both the content and the visual design of the page."""
 
 # ── App setup ──────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Notebook Transcription")
+app = FastAPI(title="Longhand")
 
 client = anthropic.AsyncAnthropic(
     api_key=os.environ.get("ANTHROPIC_API_KEY")

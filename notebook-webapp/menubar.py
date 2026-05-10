@@ -86,13 +86,13 @@ class NotebookMenuBar(rumps.App):
         self.api_key = os.environ.get("ANTHROPIC_API_KEY") or load_api_key_from_zshrc()
 
         super().__init__(
-            name="Notebook App",
+            name="Longhand",
             title=self.get_icon(),
             quit_button=None,       # We manage Quit ourselves
         )
 
         self.menu = [
-            rumps.MenuItem("Open Notebook App", callback=self.open_app),
+            rumps.MenuItem("Open Longhand", callback=self.open_app),
             rumps.MenuItem("Stop Server",        callback=self.stop_app),
             None,                               # separator
             rumps.MenuItem("Quit",               callback=self.quit_app),
@@ -117,11 +117,11 @@ class NotebookMenuBar(rumps.App):
 
     # ── Menu callbacks ─────────────────────────────────────────────────────────
 
-    @rumps.clicked("Open Notebook App")
+    @rumps.clicked("Open Longhand")
     def open_app(self, _):
         if not server_running():
             rumps.notification(
-                title="Notebook App",
+                title="Longhand",
                 subtitle="Starting server…",
                 message="Opening browser in a moment.",
             )
@@ -145,7 +145,7 @@ class NotebookMenuBar(rumps.App):
         stop_server()
         self._refresh(None)
         rumps.notification(
-            title="Notebook App",
+            title="Longhand",
             subtitle="Server stopped",
             message="",
         )
